@@ -12,7 +12,6 @@ sandbox.py
 # Project Data files
 *.xlsx
 *.csv
-*.txt
 
 # Project-wide
 .DS_Store

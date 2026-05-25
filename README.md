@@ -62,7 +62,7 @@ README.md
 
 1. **Clone the repository:**
 	 ```sh
-	 git clone <your-repo-url>
+	 git clone https://github.com/theOrganizedMind/monday.com_agents.git
 	 cd monday_agents
 	 ```
 
