@@ -2,6 +2,8 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 import json
 import os
+from dotenv import load_dotenv
+import monday
 
 
 # ========================================================================== #
@@ -17,6 +19,55 @@ import os
 
 CONTACTS_DATA = "json_files/contacts.json"
 filtered_contacts = []
+
+load_dotenv()
+MONDAY_API_KEY = os.getenv("MONDAY_API_KEY")
+DISPATCH_BOARD_ID = os.getenv("DISPATCH_BOARD_ID")
+
+# casefold(company_name) -> original label from Dispatch board
+dispatch_company_lookup = {}
+
+
+def refresh_dispatch_company_values():
+    """
+    Pull Company dropdown values from Dispatch board and cache them.
+    """
+    global dispatch_company_lookup
+    dispatch_company_lookup = {}
+
+    if not MONDAY_API_KEY or not DISPATCH_BOARD_ID:
+        return
+
+    try:
+        board_columns = monday.get_board_columns(DISPATCH_BOARD_ID, MONDAY_API_KEY)
+        column_id_map = {
+            col["title"].strip().lower(): col["id"]
+            for col in board_columns["data"]["boards"][0]["columns"]
+        }
+        company_col_id = column_id_map.get("company")
+        if not company_col_id:
+            return
+
+        company_options = monday.get_dropdown_options(
+            DISPATCH_BOARD_ID, company_col_id, MONDAY_API_KEY
+        )
+
+        dispatch_company_lookup = {
+            c.strip().casefold(): c.strip()
+            for c in company_options
+            if c and c.strip()
+        }
+    except Exception:
+        dispatch_company_lookup = {}
+
+
+def company_exists_on_dispatch_board(company):
+    """
+    True if company is empty/N/A or exists in Dispatch board Company dropdown.
+    """
+    if not company or not company.strip() or company.strip().upper() == "N/A":
+        return True
+    return company.strip().casefold() in dispatch_company_lookup
 
 
 # Load data from file
@@ -82,31 +133,33 @@ def clear_fields():
 
 def add_contact():
     """
-    Add a new contact to the contact book.
+    Add a new contact after validating the company against Dispatch board values.
 
-    This function retrieves the company name, client name, phone number, 
-    and email address from the respective Tkinter entry widgets. It then 
-    creates a new contact dictionary with these details and appends it to 
-    the contacts list stored in a JSON file. If the JSON file does not 
-    exist, it creates a new one. After successfully adding the contact, 
-    it clears the entry fields and shows a success message. If the client 
-    name or phone number is missing, it shows a warning message.
-
-    Parameters:
-    None
-
-    Returns:
-    None
+    Reads form values, blocks save when the company does not exist on the
+    Dispatch board, normalizes company text when possible, and persists the
+    new record to the contacts JSON file.
     """
     company = combo_company.get()
     client = entry_client.get()
     phone = entry_phone.get()
     email = entry_email.get()
 
+    if not company_exists_on_dispatch_board(company):
+        messagebox.showwarning(
+            "Company Error",
+            f"Company name {company} does not exist on the dispatch board."
+        )
+        return
+
     if client and phone:
+        # Normalize to the exact Dispatch-board label if present
+        normalized_company = dispatch_company_lookup.get(
+            company.strip().casefold(), company.strip()
+        ) if company else "N/A"
+
         new_contact = {
-            "company": company if company else "N/A", 
-            "name": client, 
+            "company": normalized_company if normalized_company else "N/A",
+            "name": client,
             "phone": phone,
             "email": email if email else "N/A",
         }
@@ -120,39 +173,43 @@ def add_contact():
         update_contact_list()
         update_company_list()
     else:
-        messagebox.showwarning("Input Error", 
-                               "Client name and phone number are required!")
-        
+        messagebox.showwarning(
+            "Input Error",
+            "Client name and phone number are required!"
+        )
+
 
 def update_contact():
     """
-    Update an existing contact in the contact book.
+    Update the selected contact with current form values.
 
-    This function retrieves the selected contact from the contact list, 
-    updates its details with the values from the Tkinter entry widgets, 
-    and saves the updated contacts list to the JSON file. After 
-    successfully updating the contact, it clears the entry fields and 
-    shows a success message. If no contact is selected, it shows a warning 
-    message.
-
-    Parameters:
-    None
-
-    Returns:
-    None
+    Validates company values against Dispatch board options, updates the
+    selected contact in the JSON store, and refreshes the visible lists.
     """
     selected_item = contact_list.selection()
     if selected_item:
+        company = combo_company.get()
+        if not company_exists_on_dispatch_board(company):
+            messagebox.showwarning(
+                "Company Error",
+                f"Company name {company} does not exist on the dispatch board."
+            )
+            return
+
         item_index = int(selected_item[0])
         contacts = load_data(CONTACTS_DATA)
-        
+
+        normalized_company = dispatch_company_lookup.get(
+            company.strip().casefold(), company.strip()
+        ) if company else "N/A"
+
         contacts[item_index] = {
-            "company": combo_company.get() if combo_company.get() else "N/A",
+            "company": normalized_company if normalized_company else "N/A",
             "name": entry_client.get(),
             "phone": entry_phone.get(),
             "email": entry_email.get() if entry_email.get() else "N/A",
         }
-        
+
         save_data(contacts, CONTACTS_DATA)
         messagebox.showinfo("Success", "Contact updated successfully!")
         clear_fields()
@@ -307,28 +364,46 @@ def update_contact_list(filtered_contacts=None):
 
 def update_company_list():
     """
-    Update the company list in the company combobox.
+    Refresh company options in the company combobox.
 
-    This function updates the company list in the company combobox with 
-    the unique company names from the contacts list.
-
-    Parameters:
-    None
-
-    Returns:
-    None
+    Prefers authoritative company values pulled from the Dispatch board and
+    falls back to unique company names from local contacts data.
     """
+    # Prefer authoritative Dispatch board company list.
+    if dispatch_company_lookup:
+        combo_company["values"] = sorted(dispatch_company_lookup.values())
+        return
+
+    # Fallback to companies from contacts.json if Dispatch list unavailable.
     contacts = load_data(CONTACTS_DATA)
-    companies = sorted(set(contact["company"] for contact in contacts \
-                           if contact["company"] != "N/A"))
+    companies = sorted(
+        set(contact["company"] for contact in contacts if contact["company"] != "N/A")
+    )
     combo_company["values"] = companies
 
 
 # ========================================================================== #
 # ================================ GUI ===================================== #
 # ========================================================================== #
-if __name__ == "__main__":
-    root = tk.Tk()
+def launch_contact_book(parent=None):
+    """
+    Launch the Contact Book UI as a standalone window or child dialog.
+
+    Args:
+        parent: Optional parent Tk window. If provided, opens as a modal
+            Toplevel dialog; otherwise starts its own Tk root window.
+    """
+    global root, combo_company, entry_client, entry_phone, entry_email, contact_list, filtered_contacts
+    filtered_contacts = []
+
+    is_standalone = parent is None
+    if is_standalone:
+        root = tk.Tk()
+    else:
+        root = tk.Toplevel(parent)
+        root.transient(parent)
+        root.grab_set()
+
     root.title("Contact Book")
     root.config(padx=25, pady=25)
 
@@ -350,32 +425,35 @@ if __name__ == "__main__":
     entry_email.grid(row=3, column=1, padx=10, pady=5)
 
     # Buttons to add, update, and search contacts
-    tk.Button(root, width=15, text="Add Contact", 
-            command=add_contact).grid(row=0, column=2, pady=5, sticky="w")
-    tk.Button(root, width=15, text="Update Contact", 
-            command=update_contact).grid(row=1, column=2, pady=5, sticky="w")
-    tk.Button(root, width=15, text="Remove Contact", 
-            command=remove_contact).grid(row=2, column=2, pady=5, sticky="w")
-
-    tk.Button(root, width=15, text="Search Contacts", 
-            command=search_contact).grid(row=3, column=2, pady=5, sticky="w")
-    tk.Button(root, width=15, text="Clear Results", 
-            command=clear_results).grid(row=6, column=2, pady=10, sticky="w")
+    tk.Button(root, width=15, text="Add Contact", command=add_contact).grid(row=0, column=2, pady=5, sticky="w")
+    tk.Button(root, width=15, text="Update Contact", command=update_contact).grid(row=1, column=2, pady=5, sticky="w")
+    tk.Button(root, width=15, text="Remove Contact", command=remove_contact).grid(row=2, column=2, pady=5, sticky="w")
+    tk.Button(root, width=15, text="Search Contacts", command=search_contact).grid(row=3, column=2, pady=5, sticky="w")
+    tk.Button(root, width=15, text="Clear Results", command=clear_results).grid(row=6, column=2, pady=10, sticky="w")
 
     # Create contact list display
-    contact_list = ttk.Treeview(root, columns=("Company Name", "Client Name", 
-                                            "Phone Number", "Email"), show="headings")
+    contact_list = ttk.Treeview(
+    root,
+    columns=("Company Name", "Client Name", "Phone Number", "Email"),
+    show="headings"
+    )
     contact_list.heading("Company Name", text="Company Name")
     contact_list.heading("Client Name", text="Client Name")
     contact_list.heading("Phone Number", text="Phone Number")
     contact_list.heading("Email", text="Email")
     contact_list.grid(row=7, column=0, columnspan=3, padx=10, pady=10, sticky="nsew")
 
-    # Bind double-click event to inventory list
+    # Bind double-click event
     contact_list.bind("<Double-1>", on_item_double_click)
 
     # Update contact list display on startup
+    refresh_dispatch_company_values()
     update_contact_list()
     update_company_list()
 
-    root.mainloop()
+    if is_standalone:
+        root.mainloop()
+
+if __name__ == "__main__":
+    launch_contact_book()
+ 
